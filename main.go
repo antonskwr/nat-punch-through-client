@@ -13,12 +13,18 @@ type Context struct {
 	Id uint32
 }
 
-func GetAddress() string {
-	return "127.0.0.1:8080"
+func GetRemoteAddress() *net.TCPAddr {
+	addr := net.TCPAddr{}
+	addr.IP = net.ParseIP("127.0.0.1")
+	addr.Port = 8080
+	return &addr
 }
 
 func HubPing(ctx Context) {
-	conn, err := net.Dial("tcp", GetAddress())
+	lAddr := net.TCPAddr{}
+	lAddr.Port = 9000
+
+	conn, err := net.DialTCP("tcp", &lAddr, GetRemoteAddress())
 	if err != nil {
 		util.HandleErr(err)
 		return
