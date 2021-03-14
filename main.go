@@ -2,39 +2,33 @@ package main
 
 import (
 	"fmt"
-	"io/ioutil"
-	"log"
-	"net/http"
+	"net"
+
+	"github.com/antonskwr/nat-punch-through-client/util"
 )
 
 type HubFunc func(Context)
 
 type Context struct {
-	id uint32
+	Id uint32
 }
 
-func GetBasePath() string {
-	return "http://127.0.0.1:8080/api/servers/"
+func GetAddress() string {
+	return "127.0.0.1:8080"
 }
 
-func HubAddServer(ctx Context) {
-	fmt.Println("Add server")
-}
+func HubPing(ctx Context) {
+	conn, err := net.Dial("tcp", GetAddress())
+	if err != nil {
+		util.HandleErr(err)
+		return
+	}
 
-func HubListServers(ctx Context) {
-	fmt.Println("List servers")
-	resp, err := http.Get(GetBasePath() + "list")
+	defer conn.Close()
 
-	handleErr(err)
-	printRespBody(resp)
-}
+	localAddr := conn.LocalAddr().String()
 
-func HubConnectToServer(ctx Context) {
-	fmt.Printf("Connect to server [id:%v]\n", ctx.id)
-	resp, err := http.Get(GetBasePath() + "connect")
-
-	handleErr(err)
-	printRespBody(resp)
+	fmt.Println("localAddr:", localAddr)
 }
 
 func HubInvalidOption(ctx Context) {
@@ -44,41 +38,24 @@ func HubInvalidOption(ctx Context) {
 func promptUser() (HubFunc, Context) {
 	var input string
 
-	fmt.Println("What would you like to do? (l)ist, (a)dd, (c)onnect [id]")
+	fmt.Println("What would you like to do? (p)ing")
 	emptyContext := Context{}
 
 	fmt.Scanf("%s\n", &input)
 	switch input {
-	case "l":
-		return HubListServers, emptyContext
-	case "a":
-		return HubAddServer, emptyContext
-	case "c":
-		fmt.Println("Connect selected, enter server id:")
-		var id uint32
-		// TODO(antonskwr): handle negative values and bigger than max uint32
-		// in golang will be 0 if overflood
-		fmt.Scanf("%d\n", &id)
-		connectCtx := Context {id}
-		return HubConnectToServer, connectCtx
+	case "p":
+		return HubPing, emptyContext
+	// NOTE(antonskwr): more parameters prompting
+	// case "c":
+	// 	fmt.Println("Connect selected, enter server id:")
+	// 	var id uint32
+	// 	// TODO(antonskwr): handle negative values and bigger than max uint32
+	// 	// in golang will be 0 if overflood
+	// 	fmt.Scanf("%d\n", &id)
+	// 	connectCtx := Context {id}
+	// 	return HubConnectToServer, connectCtx
 	default:
 		return HubInvalidOption, emptyContext
-	}
-}
-
-func printRespBody(resp *http.Response) {
-	defer resp.Body.Close()
-	body, err := ioutil.ReadAll(resp.Body)
-	handleErr(err)
-	fmt.Println(string(body))
-}
-
-func handleErr(err error, message ...string) {
-	if err != nil {
-		if len(message) > 0 {
-			err = fmt.Errorf("[%s] -- %w --", message[0], err)
-		}
-		log.Fatal(err)
 	}
 }
 
