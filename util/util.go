@@ -22,3 +22,7 @@ func HandleErrFatal(err error, message ...string) {
 		log.Fatal(err)
 	}
 }
+
+func PrintSeparator() {
+	fmt.Printf("=========\n\n")
+}

@@ -1,17 +1,14 @@
 package main
 
 import (
+	"bufio"
 	"fmt"
 	"net"
+	"os"
+	"strings"
 
 	"github.com/antonskwr/nat-punch-through-client/util"
 )
-
-type HubFunc func(Context)
-
-type Context struct {
-	Id uint32
-}
 
 func GetRemoteAddress() *net.TCPAddr {
 	addr := net.TCPAddr{}
@@ -20,37 +17,53 @@ func GetRemoteAddress() *net.TCPAddr {
 	return &addr
 }
 
-func HubPing(ctx Context) {
+func DialHubTCP() {
 	lAddr := net.TCPAddr{}
 	lAddr.Port = 9000
 
-	conn, err := net.DialTCP("tcp", &lAddr, GetRemoteAddress())
+	hubAddr := GetRemoteAddress()
+
+	conn, err := net.DialTCP("tcp", &lAddr, hubAddr)
 	if err != nil {
 		util.HandleErr(err)
 		return
 	}
 
-	defer conn.Close()
+	fmt.Printf("Successfully connected to Hub at: %s\n", hubAddr.String())
+	fmt.Println("Type <STOP> to close the connection")
 
-	localAddr := conn.LocalAddr().String()
+	for {
+		reader := bufio.NewReader(os.Stdin)
+		fmt.Print(">> ")
+		text, _ := reader.ReadString('\n') // NOTE(antonskwr): this line is blocking
+		fmt.Fprintf(conn, text+"\n") // NOTE(antonskwr): flust text down the connection
 
-	fmt.Println("localAddr:", localAddr)
+		// NOTE(antonskwr): server response handling
+		message, _ := bufio.NewReader(conn).ReadString('\n') // NOTE(antonskwr): blocking
+		fmt.Print("->: " + message)
+		if strings.TrimSpace(string(text)) == "STOP" {
+			fmt.Println("TCP client exiting...")
+			break
+		}
+	}
+
+	conn.SetLinger(0) // NOTE(antonskwr): close connection immediately
+	conn.Close()
 }
 
-func HubInvalidOption(ctx Context) {
+func HubInvalidOption() {
 	fmt.Println("Invalid option")
 }
 
-func promptUser() (HubFunc, Context) {
+func promptUser() {
 	var input string
 
-	fmt.Println("What would you like to do? (p)ing")
-	emptyContext := Context{}
-
+	fmt.Println("What would you like to do? dial (t)cp")
 	fmt.Scanf("%s\n", &input)
+
 	switch input {
-	case "p":
-		return HubPing, emptyContext
+	case "t":
+		DialHubTCP()
 	// NOTE(antonskwr): more parameters prompting
 	// case "c":
 	// 	fmt.Println("Connect selected, enter server id:")
@@ -61,18 +74,13 @@ func promptUser() (HubFunc, Context) {
 	// 	connectCtx := Context {id}
 	// 	return HubConnectToServer, connectCtx
 	default:
-		return HubInvalidOption, emptyContext
+		fmt.Println("Invalid option")
 	}
-}
-
-func printSeparator() {
-	fmt.Printf("=========\n\n")
 }
 
 func main() {
 	for {
-		hubFunc, ctx := promptUser()
-		hubFunc(ctx)
-		printSeparator()
+		promptUser()
+		util.PrintSeparator()
 	}
 }
