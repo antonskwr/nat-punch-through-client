@@ -11,7 +11,7 @@ import (
 	"github.com/antonskwr/nat-punch-through-client/util"
 )
 
-func StartServer(lAddr net.TCPAddr) {
+func StartTCPServer(lAddr net.TCPAddr) {
 	tcpListener, err := net.ListenTCP("tcp", &lAddr)
 
 	if err != nil {
