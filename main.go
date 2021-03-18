@@ -8,9 +8,8 @@ import (
 	"strings"
 
 	"github.com/antonskwr/nat-punch-through-client/host"
+	"github.com/antonskwr/nat-punch-through-client/reuseport"
 	"github.com/antonskwr/nat-punch-through-client/util"
-
-	reuse "github.com/libp2p/go-reuseport"
 )
 
 func GetRemoteTCPAddress() *net.TCPAddr {
@@ -77,7 +76,7 @@ func DialHubUDP(hostport string, localPort int, name string) {
 	lAddr := net.UDPAddr{}
 	lAddr.Port = localPort
 
-	conn, err := reuse.Dial("udp", lAddr.String(), hostport)
+	conn, err := reuseport.Dial("udp", lAddr.String(), hostport)
 	if err != nil {
 		util.HandleErr(err)
 		return
@@ -153,7 +152,7 @@ func PingUDP(hostport string, localPort int) bool {
 	lAddr := net.UDPAddr{}
 	lAddr.Port = localPort
 
-	conn, err := reuse.Dial("udp", lAddr.String(), hostport)
+	conn, err := reuseport.Dial("udp", lAddr.String(), hostport)
 	if err != nil {
 		util.HandleErr(err)
 		return false

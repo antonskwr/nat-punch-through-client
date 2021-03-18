@@ -8,16 +8,15 @@ import (
 	"strings"
 	"time"
 
+	"github.com/antonskwr/nat-punch-through-client/reuseport"
 	"github.com/antonskwr/nat-punch-through-client/util"
-
-	reuse "github.com/libp2p/go-reuseport"
 )
 
 func StartUDPServer(port int) {
 	udpAddr := net.UDPAddr{}
 	udpAddr.Port = port
 
-	conn, connErr := reuse.ListenPacket("udp", udpAddr.String())
+	conn, connErr := reuseport.ListenPacket("udp", udpAddr.String())
 	if connErr != nil {
 		util.HandleErrFatal(connErr)
 		return
