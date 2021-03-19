@@ -12,159 +12,6 @@ import (
 	"github.com/antonskwr/nat-punch-through-client/util"
 )
 
-func GetRemoteTCPAddress() *net.TCPAddr {
-	addr := net.TCPAddr{}
-	addr.IP = net.ParseIP("127.0.0.1")
-	addr.Port = 8080
-	return &addr
-}
-
-func GetRemoteUDPAddress() *net.UDPAddr {
-	addr := net.UDPAddr{}
-	addr.IP = net.ParseIP("127.0.0.1")
-	addr.Port = 8080
-	return &addr
-}
-
-func DialHubTCP() {
-	lAddr := net.TCPAddr{}
-	lAddr.Port = 9000
-
-	hubAddr := GetRemoteTCPAddress()
-
-	conn, err := net.DialTCP("tcp", &lAddr, hubAddr)
-	if err != nil {
-		util.HandleErr(err)
-		return
-	}
-
-	conn.SetLinger(0) // NOTE(antonskwr): close connection immediately after Close() called
-	defer conn.Close()
-
-	fmt.Printf("TCP: Successfully connected to Hub at %s\n", conn.RemoteAddr().String())
-	fmt.Println("Type <STOP> to close the connection")
-
-	for {
-		reader := bufio.NewReader(os.Stdin)
-		fmt.Print(">> ")
-		text, err := reader.ReadString('\n') // NOTE(antonskwr): this line is blocking
-
-		if err != nil {
-			util.HandleErr(err)
-			continue
-		}
-
-		fmt.Fprintf(conn, text+"\n") // NOTE(antonskwr): flust text down the connection
-
-		// NOTE(antonskwr): server response handling
-		message, err := bufio.NewReader(conn).ReadString('\n') // NOTE(antonskwr): blocking
-
-		if err != nil {
-			util.HandleErr(err)
-			continue
-		}
-
-		fmt.Print("->: " + message)
-		if strings.TrimSpace(string(text)) == "STOP" {
-			fmt.Println("TCP client exiting...")
-			break
-		}
-	}
-}
-
-func DialHubUDP(hostport string, localPort int, name string) {
-	lAddr := net.UDPAddr{}
-	lAddr.Port = localPort
-
-	conn, err := reuseport.Dial("udp", lAddr.String(), hostport)
-	if err != nil {
-		util.HandleErr(err)
-		return
-	}
-
-	defer conn.Close()
-
-	fmt.Printf("UDP: Successfully connected to %s at %s\n", name, conn.RemoteAddr().String())
-	fmt.Println("Type <STOP> to close the connection")
-	fmt.Println("Type <LIST> to list available hosts")
-	fmt.Println("Type <ADD [id]> to register host with id")
-	fmt.Println("Type <CONN [id]> to connect to host with id")
-	fmt.Println("Type <PULL> to pull msgs from connection (debug only)")
-
-	var interruptResp Resp
-
-	for {
-		reader := bufio.NewReader(os.Stdin)
-		fmt.Print(">> ")
-		text, err := reader.ReadString('\n') // NOTE(antonskwr): this line is blocking
-		// NOTE(antonskwr): ReadString() returns string with the delimeter included
-
-		if err != nil {
-			util.HandleErr(err)
-			continue
-		}
-
-		if strings.TrimSpace(text) == "STOP" {
-			fmt.Println("UDP client exiting...")
-			return
-		}
-
-		if strings.TrimSpace(text) != "PULL" {
-			msgData := []byte(text)      // NOTE(antonskwr): flush text down the connection
-			_, err = conn.Write(msgData) // TODO(antonskwr): handle number of bytes written
-
-			if err != nil {
-				util.HandleErr(err)
-				continue
-			}
-		}
-
-		incomingBuffer := make([]byte, 1024)
-		n, err := conn.Read(incomingBuffer)
-		if err != nil {
-			util.HandleErr(err)
-			continue
-		}
-
-		trimmedBuffer := strings.TrimSpace(string(incomingBuffer[0:n]))
-		fmt.Printf("HUB reply: %s\n", trimmedBuffer)
-
-		resp := handleMsgFromPacket(trimmedBuffer)
-		if resp.rType != RespTypeContinue {
-			interruptResp = resp
-			break
-		}
-	}
-
-	switch interruptResp.rType {
-	case RespTypeOk:
-		for !PingUDP(interruptResp.payload, localPort) {
-		}
-		DialHubUDP(interruptResp.payload, localPort, "host")
-	case RespTypeReq:
-		for !PingUDP(interruptResp.payload, localPort) {
-		}
-		fmt.Println("Was able to connect to client")
-	}
-}
-
-func PingUDP(hostport string, localPort int) bool {
-	lAddr := net.UDPAddr{}
-	lAddr.Port = localPort
-
-	conn, err := reuseport.Dial("udp", lAddr.String(), hostport)
-	if err != nil {
-		util.HandleErr(err)
-		return false
-	}
-
-	defer conn.Close()
-
-	fmt.Println("PingUDP connection successful")
-
-	return true
-}
-
 type RespType int
 
 const (
@@ -178,6 +25,150 @@ type Resp struct {
 	payload string
 }
 
+type CompletionHadler func()
+
+func CompletionHadlerNone() {}
+
+type HubFunc func(ClientContext)
+
+func ReadMsgFromConn(conn net.Conn, c chan []byte, abortChan <-chan int) {
+	for {
+		select {
+		case <-abortChan:
+			return
+		default:
+			incomingBuffer := make([]byte, 1024)
+			n, err := conn.Read(incomingBuffer)
+			if err != nil {
+				util.HandleErrNonFatal(err)
+				continue
+			}
+
+			c <- incomingBuffer[:n]
+		}
+	}
+}
+
+func PromptUserMsg(conn net.Conn, c chan string, abortChan <-chan int) {
+	reader := bufio.NewReader(os.Stdin)
+	for {
+		select {
+		case <-abortChan:
+			return
+		default:
+			fmt.Print(">> ")
+			text, err := reader.ReadString('\n')
+
+			if err != nil {
+				util.HandleErrNonFatal(err)
+				continue
+			}
+
+			c <- text
+		}
+	}
+}
+
+func DialHubUDP(hostport string, localPort int, targetName string) CompletionHadler {
+	lAddr := net.UDPAddr{}
+	lAddr.Port = localPort
+
+	conn, err := reuseport.Dial("udp", lAddr.String(), hostport)
+	if err != nil {
+		util.HandleErrNonFatal(err)
+		return CompletionHadlerNone
+	}
+
+	defer conn.Close()
+
+	fmt.Printf("UDP: Successfully dialed %s at %s\n", targetName, conn.RemoteAddr().String())
+	fmt.Println("Type <STOP> to close the connection")
+	fmt.Println("Type <LIST> to list available hosts")
+	fmt.Println("Type <ADD [id]> to register host with id")
+	fmt.Println("Type <JOIN [id]> to connect to host with id")
+
+	userPromptChan := make(chan string)
+	serverMsgChan := make(chan []byte)
+	abortChan := make(chan int)
+
+	go PromptUserMsg(conn, userPromptChan, abortChan)
+	go ReadMsgFromConn(conn, serverMsgChan, abortChan)
+
+	for {
+		select {
+		case receivedBuffer := <-serverMsgChan:
+			trimmedBuffer := strings.TrimSpace(string(receivedBuffer))
+			fmt.Printf("%s reply: %s\n", targetName, trimmedBuffer)
+
+			resp := handleMsgFromPacket(trimmedBuffer)
+			if resp.rType == RespTypeOk || resp.rType == RespTypeReq {
+				// TODO(antonskwr) intorduce some kind of timeout for ping procedure
+			InnerLoop:
+				for {
+					err = PingUDP(resp.payload, localPort)
+					if err == nil {
+						break InnerLoop
+					}
+					// TODO(antonskwr): sleep
+				}
+
+				switch resp.rType {
+				case RespTypeOk:
+					abortChan <- 0
+					return func() {
+						DialHubUDP(resp.payload, localPort, "Host Server")
+					}
+				case RespTypeReq:
+				}
+			}
+		case userMsg := <-userPromptChan:
+			if strings.TrimSpace(userMsg) == "STOP" {
+				fmt.Println("UDP client exiting...")
+				abortChan <- 0
+				return CompletionHadlerNone
+			}
+
+			msgData := []byte(userMsg)   // NOTE(antonskwr): flush text down the connection
+			_, err = conn.Write(msgData) // TODO(antonskwr): handle number of bytes written
+
+			if err != nil {
+				util.HandleErrNonFatal(err)
+				continue
+			}
+		}
+	}
+
+	return CompletionHadlerNone
+}
+
+func PingUDP(hostport string, localPort int) error {
+	lAddr := net.UDPAddr{}
+	lAddr.Port = localPort
+
+	conn, err := reuseport.Dial("udp", lAddr.String(), hostport)
+	if err != nil {
+		return err
+	}
+
+	defer conn.Close()
+
+	fmt.Println("PingUDP dial successful")
+
+	pingData := []byte("ping")
+	_, err = conn.Write(pingData)
+	if err != nil {
+		return err
+	}
+
+	incomingBuffer := make([]byte, 5)
+	_, err = conn.Read(incomingBuffer)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
 func handleMsgFromPacket(msg string) Resp {
 	splittedMsgs := strings.Split(msg, " ")
 
@@ -186,7 +177,7 @@ func handleMsgFromPacket(msg string) Resp {
 			hostport := splittedMsgs[1]
 			host, port, err := net.SplitHostPort(hostport)
 			if err != nil {
-				util.HandleErr(err, "failed to parse hostport %s", hostport)
+				util.HandleErrNonFatal(err, "failed to parse hostport %s", hostport)
 				return Resp{RespTypeContinue, ""}
 			}
 
@@ -198,7 +189,7 @@ func handleMsgFromPacket(msg string) Resp {
 			hostport := splittedMsgs[1]
 			host, port, err := net.SplitHostPort(hostport)
 			if err != nil {
-				util.HandleErr(err, "failed to parse hostport %s", hostport)
+				util.HandleErrNonFatal(err, "failed to parse hostport %s", hostport)
 				return Resp{RespTypeContinue, ""}
 			}
 
@@ -211,7 +202,7 @@ func handleMsgFromPacket(msg string) Resp {
 	return Resp{RespTypeContinue, ""}
 }
 
-func HubInvalidOption() {
+func HubInvalidOption(ctx ClientContext) {
 	fmt.Println("Invalid option")
 }
 
@@ -235,57 +226,71 @@ func promptPort() (int, error) {
 	return port, nil
 }
 
-func promptUser() {
+func promptUser() HubFunc {
 	var input string
 
 	fmt.Println("What would you like to do?")
 	fmt.Println("(s)tart server at [port]")
+	fmt.Println("s(t)op server")
 	fmt.Println("(d)ial hub at [hostport] from [port]")
-	// fmt.Println("(di)al hub at [hostname] from [port]")
 	fmt.Printf("-> ")
 	fmt.Scanf("%s\n", &input)
 
 	switch input {
 	case "s":
-		port, err := promptPort()
-		if err != nil {
-			util.HandleErr(err)
-			return
+		return func(ctx ClientContext) {
+			port, err := promptPort()
+			if err != nil {
+				util.HandleErrNonFatal(err)
+				return
+			}
+			host.StartUDPServer(port, *ctx.ServerQuitChan)
 		}
-		host.StartUDPServer(port)
+	case "t":
+		return func(ctx ClientContext) {
+			(*ctx.ServerUpdateChan) <- 0
+		}
 	case "d":
-		hostport, err := promptAddr()
-		if err != nil {
-			util.HandleErr(err)
-			return
+		return func(ctx ClientContext) {
+			hostport, err := promptAddr()
+			if err != nil {
+				util.HandleErrNonFatal(err)
+				return
+			}
+			port, err := promptPort()
+			if err != nil {
+				util.HandleErrNonFatal(err)
+				return
+			}
+			completionHandler := DialHubUDP(hostport, port, "Hub")
+			completionHandler()
 		}
-		port, err := promptPort()
-		if err != nil {
-			util.HandleErr(err)
-			return
-		}
-		DialHubUDP(hostport, port, "Hub")
-		// case "di":
-		// hostport, err := promptAddr()
-		// if err != nil {
-		// 	util.HandleErr(err)
-		// 	return
-		// }
-		// // TODO: lookup ip
-		// port, err := promptPort()
-		// if err != nil {
-		// 	util.HandleErr(err)
-		// 	return
-		// }
-		// DialHubUDP(hostport, port)
 	default:
-		fmt.Println("Invalid option")
+		return HubInvalidOption
 	}
 }
 
+type ClientContext struct {
+	ServerUpdateChan *chan int
+	ServerQuitChan   *chan int
+}
+
 func main() {
+	serverQuitChan := make(chan int, 1)
+	serverUpdateChan := make(chan int, 1)
+	clientCtx := ClientContext{
+		&serverUpdateChan,
+		&serverQuitChan,
+	}
+
 	for {
-		promptUser()
-		util.PrintSeparator()
+		select {
+		case <-(*clientCtx.ServerUpdateChan):
+			(*clientCtx.ServerQuitChan) <- 0
+		default:
+			hubFunc := promptUser()
+			hubFunc(clientCtx)
+			util.PrintSeparator()
+		}
 	}
 }

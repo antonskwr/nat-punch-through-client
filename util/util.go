@@ -5,7 +5,7 @@ import (
 	"log"
 )
 
-func HandleErr(err error, message ...string) {
+func HandleErrNonFatal(err error, message ...string) {
 	if err != nil {
 		if len(message) > 0 {
 			err = fmt.Errorf("[%s] -- %w --", message[0], err)
