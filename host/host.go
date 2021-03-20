@@ -9,6 +9,11 @@ import (
 	"github.com/antonskwr/nat-punch-through-client/util"
 )
 
+func connCloseHandler(conn net.PacketConn, quit <-chan int) {
+	<-quit
+	conn.Close()
+}
+
 func StartUDPServer(port int, quit <-chan int) {
 	udpAddr := net.UDPAddr{}
 	udpAddr.Port = port
@@ -22,6 +27,7 @@ func StartUDPServer(port int, quit <-chan int) {
 	fmt.Printf("Server: Started UDP server at %s\n", conn.LocalAddr().String())
 
 	go handleConnUDP(conn, quit)
+	go connCloseHandler(conn, quit)
 }
 
 func handleConnUDP(conn net.PacketConn, quit <-chan int) {
@@ -36,25 +42,21 @@ func handleConnUDP(conn net.PacketConn, quit <-chan int) {
 			return
 		default:
 			n, addr, err := conn.ReadFrom(msgBuffer)
-			trimmedMsg := strings.TrimSpace(string(msgBuffer[0:n]))
-			fmt.Printf("Server: %s -> %s\n", addr.String(), trimmedMsg)
 
-			if trimmedMsg == "STOP" {
-				fmt.Println("Server: Exiting UDP server!")
+			if err != nil {
+				util.HandleErrNonFatal(err, "Server will stop listening")
 				return
 			}
 
-			if err != nil {
-				util.HandleErrNonFatal(err)
-				continue
-			}
+			trimmedMsg := strings.TrimSpace(string(msgBuffer[0:n]))
+			fmt.Printf("Server: %s -> %s\n", addr.String(), trimmedMsg)
 
 			resp := handleMsgFromPacket(trimmedMsg, &addr)
 			_, err = conn.WriteTo([]byte(resp), addr) // TODO(antonskwr): handle the number of bytes
 
 			if err != nil {
 				util.HandleErrNonFatal(err)
-				continue
+				continue // TODO(antonskwr): consider returning here
 			}
 		}
 	}

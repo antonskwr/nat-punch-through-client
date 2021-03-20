@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/antonskwr/nat-punch-through-client/host"
 	"github.com/antonskwr/nat-punch-through-client/reuseport"
@@ -25,11 +27,11 @@ type Resp struct {
 	payload string
 }
 
-type CompletionHadler func()
+type CompletionHadler func(<-chan string)
 
-func CompletionHadlerNone() {}
+func CompletionHadlerNone(stdinChan <-chan string) {}
 
-type HubFunc func(ClientContext)
+type HubFunc func(ClientContext, <-chan string)
 
 func ReadMsgFromConn(conn net.Conn, c chan []byte, abortChan <-chan int) {
 	for {
@@ -40,8 +42,8 @@ func ReadMsgFromConn(conn net.Conn, c chan []byte, abortChan <-chan int) {
 			incomingBuffer := make([]byte, 1024)
 			n, err := conn.Read(incomingBuffer)
 			if err != nil {
-				util.HandleErrNonFatal(err)
-				continue
+				util.HandleErrNonFatal(err, "Closing UDP Conn")
+				return
 			}
 
 			c <- incomingBuffer[:n]
@@ -49,14 +51,13 @@ func ReadMsgFromConn(conn net.Conn, c chan []byte, abortChan <-chan int) {
 	}
 }
 
-func PromptUserMsg(conn net.Conn, c chan string, abortChan <-chan int) {
+func ReadFromStdin(c chan string, abortChan <-chan int) {
 	reader := bufio.NewReader(os.Stdin)
 	for {
 		select {
 		case <-abortChan:
 			return
 		default:
-			fmt.Print(">> ")
 			text, err := reader.ReadString('\n')
 
 			if err != nil {
@@ -69,7 +70,7 @@ func PromptUserMsg(conn net.Conn, c chan string, abortChan <-chan int) {
 	}
 }
 
-func DialHubUDP(hostport string, localPort int, targetName string) CompletionHadler {
+func DialHubUDP(hostport string, localPort int, targetName string, stdinChan <-chan string) CompletionHadler {
 	lAddr := net.UDPAddr{}
 	lAddr.Port = localPort
 
@@ -87,11 +88,9 @@ func DialHubUDP(hostport string, localPort int, targetName string) CompletionHad
 	fmt.Println("Type <ADD [id]> to register host with id")
 	fmt.Println("Type <JOIN [id]> to connect to host with id")
 
-	userPromptChan := make(chan string)
 	serverMsgChan := make(chan []byte)
-	abortChan := make(chan int)
+	abortChan := make(chan int, 1)
 
-	go PromptUserMsg(conn, userPromptChan, abortChan)
 	go ReadMsgFromConn(conn, serverMsgChan, abortChan)
 
 	for {
@@ -107,21 +106,22 @@ func DialHubUDP(hostport string, localPort int, targetName string) CompletionHad
 				for {
 					err = PingUDP(resp.payload, localPort)
 					if err == nil {
+						fmt.Println("PingUDP connection successful")
 						break InnerLoop
 					}
-					// TODO(antonskwr): sleep
+					time.Sleep(500 * time.Millisecond)
 				}
 
 				switch resp.rType {
 				case RespTypeOk:
 					abortChan <- 0
-					return func() {
-						DialHubUDP(resp.payload, localPort, "Host Server")
+					return func(stdinCh <-chan string) {
+						DialHubUDP(resp.payload, localPort, "Host Server", stdinCh)
 					}
 				case RespTypeReq:
 				}
 			}
-		case userMsg := <-userPromptChan:
+		case userMsg := <-stdinChan:
 			if strings.TrimSpace(userMsg) == "STOP" {
 				fmt.Println("UDP client exiting...")
 				abortChan <- 0
@@ -137,8 +137,6 @@ func DialHubUDP(hostport string, localPort int, targetName string) CompletionHad
 			}
 		}
 	}
-
-	return CompletionHadlerNone
 }
 
 func PingUDP(hostport string, localPort int) error {
@@ -202,44 +200,40 @@ func handleMsgFromPacket(msg string) Resp {
 	return Resp{RespTypeContinue, ""}
 }
 
-func HubInvalidOption(ctx ClientContext) {
+func HubInvalidOption(ctx ClientContext, stdinChan <-chan string) {
 	fmt.Println("Invalid option")
 }
 
-func promptAddr() (string, error) {
+func promptAddr(stdinChan <-chan string) string {
 	fmt.Printf("enter address: ")
-	var addr string
-	_, err := fmt.Scanf("%s\n", &addr)
-	if err != nil {
-		return "", err
-	}
-	return addr, nil
+	sAddr := <-stdinChan
+	trimmedAddr := strings.TrimSpace(sAddr)
+	return trimmedAddr
 }
 
-func promptPort() (int, error) {
+func promptPort(stdinChan <-chan string) (int, error) {
 	fmt.Printf("enter port: ")
-	var port int
-	_, err := fmt.Scanf("%d\n", &port)
+	sPort := <-stdinChan
+	port, err := strconv.Atoi(strings.TrimSpace(sPort))
 	if err != nil {
 		return 0, err
 	}
 	return port, nil
 }
 
-func promptUser() HubFunc {
-	var input string
-
+func promptUser(stdinChan <-chan string) HubFunc {
 	fmt.Println("What would you like to do?")
 	fmt.Println("(s)tart server at [port]")
 	fmt.Println("s(t)op server")
 	fmt.Println("(d)ial hub at [hostport] from [port]")
 	fmt.Printf("-> ")
-	fmt.Scanf("%s\n", &input)
+	input := <-stdinChan
+	trimedInput := strings.TrimSpace(input)
 
-	switch input {
+	switch trimedInput {
 	case "s":
-		return func(ctx ClientContext) {
-			port, err := promptPort()
+		return func(ctx ClientContext, stdinChan <-chan string) {
+			port, err := promptPort(stdinChan)
 			if err != nil {
 				util.HandleErrNonFatal(err)
 				return
@@ -247,23 +241,24 @@ func promptUser() HubFunc {
 			host.StartUDPServer(port, *ctx.ServerQuitChan)
 		}
 	case "t":
-		return func(ctx ClientContext) {
-			(*ctx.ServerUpdateChan) <- 0
+		return func(ctx ClientContext, stdinChan <-chan string) {
+			(*ctx.ServerQuitChan) <- 0
 		}
 	case "d":
-		return func(ctx ClientContext) {
-			hostport, err := promptAddr()
+		return func(ctx ClientContext, stdinChan <-chan string) {
+			hostport := promptAddr(stdinChan)
+			if hostport == "" {
+				err := fmt.Errorf("hostport is empty")
+				util.HandleErrNonFatal(err)
+				return
+			}
+			port, err := promptPort(stdinChan)
 			if err != nil {
 				util.HandleErrNonFatal(err)
 				return
 			}
-			port, err := promptPort()
-			if err != nil {
-				util.HandleErrNonFatal(err)
-				return
-			}
-			completionHandler := DialHubUDP(hostport, port, "Hub")
-			completionHandler()
+			completionHandler := DialHubUDP(hostport, port, "Hub", stdinChan)
+			completionHandler(stdinChan)
 		}
 	default:
 		return HubInvalidOption
@@ -271,26 +266,22 @@ func promptUser() HubFunc {
 }
 
 type ClientContext struct {
-	ServerUpdateChan *chan int
-	ServerQuitChan   *chan int
+	ServerQuitChan *chan int
 }
 
 func main() {
-	serverQuitChan := make(chan int, 1)
-	serverUpdateChan := make(chan int, 1)
+	serverQuitChan := make(chan int)
+	stdinChan := make(chan string) // NOTE(antonskwr): don't put into goroutines, other than ReadFromStdin
+	stdinAbortChan := make(chan int)
+	go ReadFromStdin(stdinChan, stdinAbortChan)
+
 	clientCtx := ClientContext{
-		&serverUpdateChan,
 		&serverQuitChan,
 	}
 
 	for {
-		select {
-		case <-(*clientCtx.ServerUpdateChan):
-			(*clientCtx.ServerQuitChan) <- 0
-		default:
-			hubFunc := promptUser()
-			hubFunc(clientCtx)
-			util.PrintSeparator()
-		}
+		hubFunc := promptUser(stdinChan)
+		hubFunc(clientCtx, stdinChan)
+		util.PrintSeparator()
 	}
 }
