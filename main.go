@@ -102,24 +102,22 @@ func DialHubUDP(hostport string, localPort int, targetName string, stdinChan <-c
 			resp := handleMsgFromPacket(trimmedBuffer)
 			if resp.rType == RespTypeOk || resp.rType == RespTypeReq {
 				// TODO(antonskwr) intorduce some kind of timeout for ping procedure
-			InnerLoop:
-				for {
-					err = PingUDP(resp.payload, localPort)
-					if err == nil {
-						fmt.Println("PingUDP connection successful")
-						break InnerLoop
-					}
-					util.HandleErrNonFatal(err, "PingUDP connection error, will retry")
-					time.Sleep(500 * time.Millisecond)
+				peerConn, err := PingUDP(resp.payload, localPort)
+				if err != nil {
+
 				}
 
 				switch resp.rType {
 				case RespTypeOk:
 					abortChan <- 0
 					return func(stdinCh <-chan string) {
-						DialHubUDP(resp.payload, localPort, "Host Server", stdinCh)
+						host.StartChatOnConnection(peerConn, stdinCh)
 					}
 				case RespTypeReq:
+					abortChan <- 0
+					return func(stdinCh <-chan string) {
+						host.StartChatOnConnection(peerConn, stdinCh)
+					}
 				}
 			}
 		case userMsg := <-stdinChan:
@@ -140,32 +138,58 @@ func DialHubUDP(hostport string, localPort int, targetName string, stdinChan <-c
 	}
 }
 
-func PingUDP(hostport string, localPort int) error {
+func PingUDP(hostport string, localPort int) (net.Conn, error) {
 	lAddr := net.UDPAddr{}
 	lAddr.Port = localPort
 
 	conn, err := reuseport.Dial("udp", lAddr.String(), hostport)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
-	defer conn.Close()
+	// defer conn.Close()
 
 	fmt.Println("PingUDP dial successful")
 
 	pingData := []byte("ping")
-	_, err = conn.Write(pingData)
-	if err != nil {
-		return err
+	pingChan := make(chan int)
+
+	go ReadFromPingConn(conn, pingChan)
+
+	// TODO(antonskwr): implement timeout (close connection, return custom error)
+InnerLoop:
+	for {
+		select {
+		case respCode := <-pingChan:
+			if respCode == 1 {
+				// connection successful
+				break InnerLoop
+			}
+		default:
+			_, err = conn.Write(pingData)
+			if err != nil {
+				util.HandleErrNonFatal(err, "PingUDP write error")
+			}
+			fmt.Println("PingUDP will retry write...")
+			time.Sleep(500 * time.Millisecond)
+		}
 	}
 
-	incomingBuffer := make([]byte, 5)
-	_, err = conn.Read(incomingBuffer)
-	if err != nil {
-		return err
-	}
+	return conn, nil
+}
 
-	return nil
+func ReadFromPingConn(conn net.Conn, c chan int) {
+	for {
+		incomingBuffer := make([]byte, 5)
+		_, err := conn.Read(incomingBuffer) // NOTE(antonskwr): might be blocking
+		if err != nil {
+			util.HandleErrNonFatal(err, "ReadFromPingConn error")
+			continue
+		}
+
+		c <- 1
+		return
+	}
 }
 
 func handleMsgFromPacket(msg string) Resp {
