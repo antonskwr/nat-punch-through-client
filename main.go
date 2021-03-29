@@ -109,6 +109,7 @@ func DialHubUDP(hostport string, localPort int, targetName string, stdinChan <-c
 						fmt.Println("PingUDP connection successful")
 						break InnerLoop
 					}
+					util.HandleErrNonFatal(err, "PingUDP connection error, will retry")
 					time.Sleep(500 * time.Millisecond)
 				}
 
