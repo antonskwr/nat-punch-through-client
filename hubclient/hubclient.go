@@ -34,7 +34,21 @@ func CompletionHadlerNone(stdinChan <-chan string) {}
 
 type HubFunc func(ClientContext, <-chan string)
 
-func SendHeartBeat(conn net.Conn) {}
+func SendHeartBeat(conn net.Conn, abortChan <-chan int) {
+	heartbeatData := []byte("hb")
+	for {
+		select {
+		case <-abortChan:
+			return
+		default:
+			_, err := conn.Write(heartbeatData)
+			if err != nil {
+				util.HandleErrNonFatal(err, "Heartbeat write error")
+			}
+			time.Sleep(500 * time.Millisecond)
+		}
+	}
+}
 
 func DialHubUDP(hostport string, localPort int, targetName string, stdinChan <-chan string) CompletionHadler {
 	lAddr := net.UDPAddr{}
@@ -57,6 +71,7 @@ func DialHubUDP(hostport string, localPort int, targetName string, stdinChan <-c
 	serverMsgChan := make(chan []byte)
 	abortChan := make(chan int, 1)
 
+	go SendHeartBeat(conn, abortChan)
 	go ReadMsgFromConn(conn, serverMsgChan, abortChan)
 
 	for {
